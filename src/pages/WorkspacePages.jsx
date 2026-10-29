@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   ArrowDownToLine,
   ArrowUpRight,
@@ -19,6 +19,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { API_BASE_URL } from '../services/apiClient.js'
 import { useDemoData } from '../data/DemoDataContext.jsx'
 import {
   BarChart,
@@ -48,7 +49,7 @@ function nextId(prefix, records) {
   return `${prefix}-${max + 1}`
 }
 
-function RecordForm({ title, fields, onClose, onSave, saveLabel = 'Save to demo' }) {
+function RecordForm({ title, fields, onClose, onSave, saveLabel = 'Save to demo', showDemoNote = true }) {
   const initialValues = Object.fromEntries(fields.map((field) => [field.name, field.initial || '']))
   const [values, setValues] = useState(initialValues)
   const [error, setError] = useState('')
@@ -122,15 +123,17 @@ function RecordForm({ title, fields, onClose, onSave, saveLabel = 'Save to demo'
           ))}
         </div>
         {error && <p role="alert" className="text-xs text-rose-600">{error}</p>}
-        <p className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
-          Demo only. This record is held in page state and is not sent to a server.
-        </p>
+        {showDemoNote && (
+          <p className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+            Demo only. This record is held in page state and is not sent to a server.
+          </p>
+        )}
       </form>
     </Modal>
   )
 }
 
-function DetailDialog({ title, rows, onClose }) {
+function DetailDialog({ title, rows, onClose, showDemoNote = true }) {
   return (
     <Modal title={title} onClose={onClose}>
       <div className="space-y-3">
@@ -140,7 +143,7 @@ function DetailDialog({ title, rows, onClose }) {
             <span className="text-right text-xs font-medium text-slate-800">{value || '—'}</span>
           </div>
         ))}
-        <p className="pt-1 text-[11px] text-slate-400">Sample workspace details · Demo data only</p>
+        {showDemoNote && <p className="pt-1 text-[11px] text-slate-400">Sample workspace details · Demo data only</p>}
       </div>
     </Modal>
   )
@@ -434,44 +437,150 @@ function Maintenance() {
 }
 
 function Staff() {
-  const { staff, addRecord, updateRecord } = useDemoData()
+  const [staff, setStaff] = useState([])
   const [tab, setTab] = useState('All')
   const [query, setQuery] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [selected, setSelected] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  async function staffRequest(path, options = {}) {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      credentials: 'include',
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    })
+
+    const contentType = response.headers.get('content-type') || ''
+    const data = contentType.includes('application/json')
+      ? await response.json().catch(() => ({}))
+      : await response.text().catch(() => '')
+
+    if (!response.ok) {
+      const detail = data && typeof data === 'object' ? data.detail : data
+      const message = Array.isArray(detail)
+        ? detail.map((item) => item?.msg || String(item)).join(', ')
+        : detail || `Request failed (${response.status})`
+      throw new Error(String(message))
+    }
+    return data
+  }
+
+  async function loadStaff() {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await staffRequest('/staff/')
+      setStaff(Array.isArray(data) ? data : (data.items || []))
+    } catch (requestError) {
+      setError(requestError.message || 'Unable to load staff. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadStaff()
+    // Load once when the Staff page mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const filtered = staff.filter((person) =>
     (tab === 'All' || person.status === tab)
-    && `${person.name} ${person.role} ${person.phone}`.toLowerCase().includes(query.toLowerCase()),
+    && `${person.name || ''} ${person.role || ''} ${person.phone || ''}`.toLowerCase().includes(query.toLowerCase()),
   )
+
+  async function createStaff(values) {
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      const created = await staffRequest('/staff/', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: values.name.trim(),
+          role: values.role,
+          phone: values.phone.trim(),
+          salary: Number(values.salary),
+          nextSalary: values.nextSalary || '',
+          attendance: 'Not recorded',
+          status: 'Active',
+        }),
+      })
+      setStaff((current) => [created, ...current])
+      setShowForm(false)
+      setNotice('Staff member added successfully.')
+    } catch (requestError) {
+      setError(requestError.message || 'Unable to add staff member.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleStaffStatus(person) {
+    const nextStatus = person.status === 'Active' ? 'Inactive' : 'Active'
+    setError('')
+    setNotice('')
+    try {
+      const updated = await staffRequest(`/staff/${encodeURIComponent(person.id)}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: nextStatus }),
+      })
+      setStaff((current) => current.map((item) => item.id === person.id ? updated : item))
+      setSelected((current) => current?.id === person.id ? updated : current)
+      setNotice(`${person.name} is now ${nextStatus.toLowerCase()}.`)
+    } catch (requestError) {
+      setError(requestError.message || 'Unable to update staff status.')
+    }
+  }
 
   return (
     <div>
-      <PageHeader title="Staff" description="Manage your team, roles, attendance and payroll overview." action={<Button onClick={() => setShowForm(true)}><Plus size={16} />Add staff</Button>} />
+      <PageHeader title="Staff" description="Manage your team, roles, attendance and payroll overview." action={<Button onClick={() => { setError(''); setNotice(''); setShowForm(true) }}><Plus size={16} />Add staff</Button>} />
+      {error && <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs leading-5 text-rose-700">{error}</div>}
+      {notice && <div role="status" className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs leading-5 text-emerald-800">{notice}</div>}
       <div className="mb-5 grid grid-cols-2 gap-3 xl:grid-cols-3">
-        <MetricCard label="Team members" value={staff.length} caption="Sample profiles" icon={Users} />
+        <MetricCard label="Team members" value={staff.length} caption="Saved in your workspace" icon={Users} />
         <MetricCard label="Active team" value={staff.filter((person) => person.status === 'Active').length} icon={ShieldCheck} tone="green" />
-        <MetricCard label="Monthly payroll" value={currency(staff.filter((person) => person.status === 'Active').reduce((sum, person) => sum + Number(person.salary), 0))} icon={BadgeIndianRupee} tone="violet" />
+        <MetricCard label="Monthly payroll" value={currency(staff.filter((person) => person.status === 'Active').reduce((sum, person) => sum + Number(person.salary || 0), 0))} icon={BadgeIndianRupee} tone="violet" />
       </div>
       <Card className="overflow-hidden">
         <Tabs items={['All', 'Active', 'Inactive']} value={tab} onChange={setTab} />
         <div className="p-4 sm:p-5"><SearchField value={query} onChange={setQuery} placeholder="Search team members…" /></div>
-        <DataTable rows={filtered} columns={[
-          { key: 'name', label: 'Team member', render: (row) => <button type="button" onClick={() => setSelected(row)} className="text-left font-medium text-slate-800 hover:text-emerald-800">{row.name}<span className="mt-1 block text-[11px] font-normal text-slate-400">{row.id}</span></button> },
-          { key: 'role', label: 'Role' }, { key: 'phone', label: 'Phone' },
-          { key: 'salary', label: 'Monthly salary', render: (row) => currency(row.salary) },
-          { key: 'attendance', label: 'Attendance' }, { key: 'nextSalary', label: 'Next salary' },
-          { key: 'status', label: 'Status', render: (row) => <StatusBadge status={row.status} /> },
-          { key: 'action', label: '', render: (row) => <Button variant="quiet" className="min-h-8 px-2.5" onClick={() => updateRecord('staff', row.id, { status: row.status === 'Active' ? 'Inactive' : 'Active' })}>{row.status === 'Active' ? 'Deactivate' : 'Activate'}</Button> },
-        ]} />
+        {loading ? (
+          <div className="px-5 py-12 text-center text-sm text-slate-500">Loading staff from your workspace…</div>
+        ) : (
+          <DataTable rows={filtered} columns={[
+            { key: 'name', label: 'Team member', render: (row) => <button type="button" onClick={() => setSelected(row)} className="text-left font-medium text-slate-800 hover:text-emerald-800">{row.name}<span className="mt-1 block text-[11px] font-normal text-slate-400">{row.id}</span></button> },
+            { key: 'role', label: 'Role' }, { key: 'phone', label: 'Phone' },
+            { key: 'salary', label: 'Monthly salary', render: (row) => currency(row.salary) },
+            { key: 'attendance', label: 'Attendance', render: (row) => row.attendance || 'Not recorded' },
+            { key: 'nextSalary', label: 'Next salary', render: (row) => row.nextSalary || '—' },
+            { key: 'status', label: 'Status', render: (row) => <StatusBadge status={row.status} /> },
+            { key: 'action', label: '', render: (row) => <Button variant="quiet" className="min-h-8 px-2.5" onClick={() => toggleStaffStatus(row)}>{row.status === 'Active' ? 'Deactivate' : 'Activate'}</Button> },
+          ]} />
+        )}
+        <p className="border-t border-slate-100 px-5 py-3 text-[11px] text-slate-400">{loading ? 'Loading records…' : `${filtered.length} staff member${filtered.length === 1 ? '' : 's'} shown`}</p>
       </Card>
-      {showForm && <RecordForm title="Add team member" onClose={() => setShowForm(false)} fields={[
+      {showForm && <RecordForm title="Add team member" onClose={() => { if (!saving) setShowForm(false) }} fields={[
         { name: 'name', label: 'Full name', required: true },
         { name: 'role', label: 'Role', type: 'select', options: ['Fleet manager', 'Operations associate', 'Customer support', 'Delivery associate', 'Administrator'], required: true },
         { name: 'phone', label: 'Phone number', type: 'tel', required: true },
-        { name: 'salary', label: 'Monthly salary (₹)', type: 'number', min: 0, required: true },
+        { name: 'salary', label: 'Monthly salary (₹)', type: 'number', min: 0, step: '0.01', required: true },
         { name: 'nextSalary', label: 'Next salary date', type: 'date' },
-      ]} onSave={(values) => { addRecord('staff', { ...values, salary: Number(values.salary), id: nextId('ST', staff), attendance: 'Not recorded', status: 'Active' }); setShowForm(false) }} />}
-      {selected && <DetailDialog title={selected.name} record={selected} onClose={() => setSelected(null)} rows={Object.entries(selected).map(([key, value]) => [key, key === 'salary' ? currency(value) : value])} />}
+      ]} onSave={createStaff} saveLabel={saving ? 'Saving…' : 'Add staff'} showDemoNote={false} />}
+      {selected && <DetailDialog title={selected.name} onClose={() => setSelected(null)} showDemoNote={false} rows={[
+        ['Staff ID', selected.id], ['Full name', selected.name], ['Role', selected.role],
+        ['Phone', selected.phone], ['Monthly salary', currency(selected.salary)],
+        ['Attendance', selected.attendance || 'Not recorded'], ['Next salary', selected.nextSalary || '—'],
+        ['Status', selected.status],
+      ]} />}
     </div>
   )
 }
